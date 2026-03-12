@@ -1,0 +1,8 @@
+# Global code owner
+* @markdjones82
+
+# Libraries
+/src/ @markdjones82
+
+# Pipelines
+/eks-helm-lookup/ @markdjones82
