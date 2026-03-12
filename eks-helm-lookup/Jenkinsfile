@@ -1,0 +1,311 @@
+// Load the shared pipeline library.
+// TODO: Replace 'your-pipeline-library' with the name your library is registered under
+//       in Jenkins > Manage Jenkins > Configure System > Global Pipeline Libraries.
+// The GitHub.groovy utility used below lives in src/org/example/utilities/GitHub.groovy
+// of that library repository.
+@Library('your-pipeline-library') _
+
+import org.example.utilities.GitHub
+
+pipeline {
+    agent {
+        label 'your-agent-label'
+    }
+    parameters {
+        string(
+            name: 'SLACK_CHANNEL',
+            defaultValue: '#your-slack-channel',
+            // NOTE: Slack notifications require the Jenkins Slack Notification plugin to be
+            // installed and configured on the Jenkins controller:
+            // https://plugins.jenkins.io/slack/
+            // Configure the workspace and default token under:
+            // Jenkins → Manage Jenkins → Configure System → Slack
+            description: 'Slack channel for update notifications. Requires the Slack Notification plugin on the Jenkins controller.'
+        )
+    }
+    environment {
+        TARGET_ORG            = 'your-github-org'
+        TARGET_REPO           = 'your-tfmod-example-kubernetes-integration'
+        TARGET_DEFAULT_BRANCH = 'main'
+        TF_VAR_FILE           = 'variables.tf'
+        TF_README_FILE        = 'README.md'
+        CHANGELOG_FILE        = 'CHANGELOG.md'
+        TF_VAR_NAME           = 'example_chart_version'
+
+        CHART_REPO_NAME       = 'example-charts'
+        CHART_REPO_URL        = 'https://example.github.io/charts'
+        CHART_NAME            = 'example-kubernetes-integration'
+
+        WORKSPACE_REPO_DIR    = 'work/your-tfmod-example-kubernetes-integration'
+    }
+    stages {
+        stage('Pipeline Configuration') {
+            steps {
+                script {
+                    properties([
+                        buildDiscarder(logRotator(numToKeepStr: '180')),
+                        disableConcurrentBuilds(),
+                        pipelineTriggers([cron('TZ=America/Chicago\nH 7 1 * *')]),
+                    ])
+                }
+            }
+        }
+
+        stage('Initialize GitHub Utility') {
+            steps {
+                script {
+                    // TODO: Replace 'your-github-org' with your GitHub organization name.
+                    // TODO: Replace 'your-github-rw-credential-id' with the Jenkins credential ID
+                    //       for a GitHub PAT or App token that has read/write access to TARGET_REPO.
+                    GitHub.instance.setOrg(env.TARGET_ORG)
+                    GitHub.instance.setRepo(env.TARGET_REPO)
+                    GitHub.instance.setApiCredId('your-github-rw-credential-id')
+                }
+            }
+        }
+
+        stage('Checkout Target Module') {
+            steps {
+                dir(env.WORKSPACE_REPO_DIR) {
+                    deleteDir()
+                    checkout scm: [
+                        $class: 'GitSCM',
+                        branches: [[name: "origin/${env.TARGET_DEFAULT_BRANCH}"]],
+                        gitTool: 'Default',
+                        userRemoteConfigs: [[
+                            credentialsId: 'your-github-ro-credential-id',
+                            url: "https://github.com/${env.TARGET_ORG}/${env.TARGET_REPO}.git",
+                        ]],
+                    ]
+                }
+            }
+        }
+
+        stage('Resolve Chart Versions') {
+            steps {
+                dir(env.WORKSPACE_REPO_DIR) {
+                    script {
+                        String currentVersion = sh(
+                            returnStdout: true,
+                            script: "grep -A5 'variable \"example_chart_version\"' variables.tf | grep -m1 'default' | cut -d'\"' -f2"
+                        ).trim()
+
+                        String latestVersion = sh(
+                            returnStdout: true,
+                            script: '''
+                                #!/usr/bin/env bash
+                                set -euo pipefail
+
+                                helm repo add example-charts https://example.github.io/charts >/dev/null 2>&1 || true
+                                helm repo update >/dev/null
+                                helm search repo example-charts/example-kubernetes-integration \
+                                  --versions -o json | jq -r '.[0].version'
+                            '''
+                        ).trim()
+
+                        String currentModuleVersion = sh(
+                            returnStdout: true,
+                            script: "grep -F -m1 '## [' CHANGELOG.md | cut -d'[' -f2 | cut -d']' -f1"
+                        ).trim()
+
+                        Closure<List<Integer>> parseParts = { String version -> version.tokenize('.').collect { String part -> part as Integer } }
+                        List<Integer> currentChartParts = parseParts(currentVersion)
+                        List<Integer> latestChartParts = parseParts(latestVersion)
+                        List<Integer> currentModuleParts = parseParts(currentModuleVersion)
+
+                        // Check if update is required via manual comparison
+                        Boolean versionChanged = false
+                        for (int i = 0; i < 3; i++) {
+                            if (latestChartParts[i] > currentChartParts[i]) {
+                                versionChanged = true
+                                break
+                            } else if (latestChartParts[i] < currentChartParts[i]) {
+                                break
+                            }
+                        }
+
+                        String bumpOctet = 'patch'
+                        List<Integer> nextModuleParts = [
+                            currentModuleParts[0],
+                            currentModuleParts[1],
+                            currentModuleParts[2],
+                        ]
+
+                        if (latestChartParts[0] != currentChartParts[0]) {
+                            bumpOctet = 'major'
+                            nextModuleParts[0] = nextModuleParts[0] + 1
+                            nextModuleParts[1] = 0
+                            nextModuleParts[2] = 0
+                        } else if (latestChartParts[1] != currentChartParts[1]) {
+                            bumpOctet = 'minor'
+                            nextModuleParts[1] = nextModuleParts[1] + 1
+                            nextModuleParts[2] = 0
+                        } else {
+                            bumpOctet = 'patch'
+                            nextModuleParts[2] = nextModuleParts[2] + 1
+                        }
+
+                        String nextModuleVersion = nextModuleParts.join('.')
+
+                        env.CURRENT_CHART_VERSION = currentVersion
+                        env.LATEST_CHART_VERSION = latestVersion
+                        env.CURRENT_MODULE_VERSION = currentModuleVersion
+                        env.NEXT_MODULE_VERSION = nextModuleVersion
+                        env.HELM_BUMP_OCTET = bumpOctet
+                        env.UPDATE_REQUIRED = versionChanged.toString()
+
+                        echo "Current chart version: ${env.CURRENT_CHART_VERSION}"
+                        echo "Latest chart version:  ${env.LATEST_CHART_VERSION}"
+                        echo "Current module version: ${env.CURRENT_MODULE_VERSION}"
+                        echo "Next module version:    ${env.NEXT_MODULE_VERSION}"
+                        echo "Helm bump octet:        ${env.HELM_BUMP_OCTET}"
+                    }
+                }
+            }
+        }
+
+        stage('Update Files, Commit, Push') {
+            when {
+                expression { env.UPDATE_REQUIRED == 'true' }
+            }
+            steps {
+                dir(env.WORKSPACE_REPO_DIR) {
+                    script {
+                        env.SOURCE_BRANCH = "chore/automation/example-chart-${env.LATEST_CHART_VERSION}"
+
+                        String variablesContent = readFile(env.TF_VAR_FILE)
+                        String updatedVariablesContent = variablesContent.replaceFirst(
+                            '(default\\s*=\\s*")[^"]+"',
+                            '$1' + env.LATEST_CHART_VERSION + '"'
+                        )
+                        writeFile(file: env.TF_VAR_FILE, text: updatedVariablesContent)
+
+                        String readmeContent = readFile(env.TF_README_FILE)
+                        readmeContent = readmeContent.replace("`${env.CURRENT_CHART_VERSION}`", "`${env.LATEST_CHART_VERSION}`")
+                        readmeContent = readmeContent.replace("\"${env.CURRENT_CHART_VERSION}\"", "\"${env.LATEST_CHART_VERSION}\"")
+                        writeFile(file: env.TF_README_FILE, text: readmeContent)
+
+                        String changelogContent = readFile(env.CHANGELOG_FILE)
+                        String entryDate = new Date().format('yyyy-MM-dd')
+                        String changelogEntry = """## [${env.NEXT_MODULE_VERSION}] - ${entryDate} Automation
+
+### Changed
+- Bump example-kubernetes-integration Helm chart default from ${env.CURRENT_CHART_VERSION} to ${env.LATEST_CHART_VERSION}.
+- Increment module version from ${env.CURRENT_MODULE_VERSION} to ${env.NEXT_MODULE_VERSION} due to Helm ${env.HELM_BUMP_OCTET} version change.
+
+"""
+
+                        String updatedChangelogContent = changelogEntry + changelogContent
+                        writeFile(file: env.CHANGELOG_FILE, text: updatedChangelogContent)
+
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'your-github-rw-credential-id',
+                                usernameVariable: 'GITHUB_USERNAME',
+                                passwordVariable: 'GITHUB_TOKEN'
+                            )
+                        ]) {
+                            sh(script: '''
+                                #!/usr/bin/env bash
+                                set -euo pipefail
+
+                                # Create and checkout new branch (use -B to overwrite if it exists)
+                                git checkout -B "$SOURCE_BRANCH"
+
+                                # Stage the modified files
+                                git add "$TF_VAR_FILE" "$TF_README_FILE" "$CHANGELOG_FILE"
+
+                                # Commit and push using HTTPS with token auth
+                                git config user.email "automation@example.com"
+                                git config user.name "Automation Bot"
+                                git commit -m "chore: bump example chart to $LATEST_CHART_VERSION and module to $NEXT_MODULE_VERSION"
+
+                                git push \
+                                  "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/${TARGET_ORG}/${TARGET_REPO}.git" \
+                                  "HEAD:${SOURCE_BRANCH}" --force
+                            ''')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Open Draft PR') {
+            when {
+                expression { env.UPDATE_REQUIRED == 'true' }
+            }
+            steps {
+                script {
+                    String prTitle = "chore: bump example chart to ${env.LATEST_CHART_VERSION} (module ${env.NEXT_MODULE_VERSION})"
+
+                    String prId = GitHub.instance.openPullRequest(
+                        this,
+                        env.SOURCE_BRANCH,
+                        env.TARGET_DEFAULT_BRANCH,
+                        prTitle,
+                        true  // open as draft
+                    )
+
+                    env.PULL_REQUEST_ID = prId
+
+                    GitHub.instance.addPullRequestComment(
+                        this,
+                        'Automated Chart Version Update',
+                        """Created by ${env.JOB_NAME} #${env.BUILD_NUMBER}.
+
+**Chart Version Update**
+Current Helm Chart default: ${env.CURRENT_CHART_VERSION}
+New Helm Chart default: ${env.LATEST_CHART_VERSION}
+Current EKS Module version: ${env.CURRENT_MODULE_VERSION}
+Next EKS Module version: ${env.NEXT_MODULE_VERSION}
+Helm bump octet: ${env.HELM_BUMP_OCTET}
+
+**Testing Instructions**
+PLEASE TEST THIS CHANGE THOROUGHLY PRIOR TO MERGING. To test this change:
+
+1. Clone your Kubernetes examples repository
+2. Update the module source to point to this branch: \`source = "git::https://github.com/${env.TARGET_ORG}/${env.TARGET_REPO}?ref=${env.SOURCE_BRANCH}"\`
+3. Apply Terraform to deploy an EKS cluster with the new example chart version
+4. Verify the example Helm chart is deployed and functioning correctly
+
+Build URL: ${env.BUILD_URL}""",
+                        false
+                    )
+                }
+            }
+        }
+
+        stage('Notify Slack') {
+            when {
+                expression { env.UPDATE_REQUIRED == 'true' }
+            }
+            steps {
+                script {
+                    slackSend(
+                        channel: params.SLACK_CHANNEL,
+                        color: 'good',
+                        message: """*Example Helm Update* — draft PR opened for `${env.TARGET_REPO}`.
+*Current Helm Chart version:* `${env.CURRENT_CHART_VERSION}`
+*Latest Helm Chart version:* `${env.LATEST_CHART_VERSION}`
+*EKS Module version:* `${env.CURRENT_MODULE_VERSION}` → `${env.NEXT_MODULE_VERSION}`
+*Bump octet:* `${env.HELM_BUMP_OCTET}`
+*PR:* https://github.com/${env.TARGET_ORG}/${env.TARGET_REPO}/pull/${env.PULL_REQUEST_ID}
+*Build:* ${env.BUILD_URL}"""
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            slackSend(
+                channel: params.SLACK_CHANNEL,
+                color: 'danger',
+                message: """*Example Helm Update* — job failed.
+*Repository:* `${env.TARGET_REPO}`
+*Build:* ${env.BUILD_URL}"""
+            )
+        }
+    }
+}
