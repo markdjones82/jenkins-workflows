@@ -1,0 +1,6 @@
+### CODEOWNERS
+#
+# https://help.github.com/en/github/creating-cloning-and-archiving-repositories/about-code-owners
+
+# Default
+**    @rgare-io/csinfra-owner @rgare-io/csinfra-delegate_owners @rgare-io/csinfra-technical_leads @rgare-io/csinfra-contributors

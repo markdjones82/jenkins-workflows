@@ -1,3 +1,11 @@
+// EKS Helm Chart Version Lookup Pipeline (Using ArgoCD as Example)
+//
+// This pipeline automatically detects new releases of a Helm chart, compares versions,
+// calculates semantic version bumps, and opens draft PRs to update your Terraform module.
+//
+// This example uses ArgoCD (https://argo-cd.readthedocs.io/) as the Helm chart.
+// Adapt it for any other Helm chart by updating CHART_REPO_URL, CHART_REPO_NAME, and CHART_NAME.
+//
 // Load the shared pipeline library.
 // TODO: Replace 'your-pipeline-library' with the name your library is registered under
 //       in Jenkins > Manage Jenkins > Configure System > Global Pipeline Libraries.
@@ -24,19 +32,25 @@ pipeline {
         )
     }
     environment {
+        // GitHub repository containing the Terraform module (example: ArgoCD Helm module)
+        // TODO: Replace 'your-github-org' and 'your-tfmod-argocd' with your org and repo names
         TARGET_ORG            = 'your-github-org'
-        TARGET_REPO           = 'your-tfmod-example-kubernetes-integration'
+        TARGET_REPO           = 'your-tfmod-argocd'  // Example: a Terraform module for ArgoCD
         TARGET_DEFAULT_BRANCH = 'main'
+        
+        // Terraform module file references
         TF_VAR_FILE           = 'variables.tf'
         TF_README_FILE        = 'README.md'
         CHANGELOG_FILE        = 'CHANGELOG.md'
-        TF_VAR_NAME           = 'example_chart_version'
+        TF_VAR_NAME           = 'argocd_chart_version'  // Terraform variable to update
 
-        CHART_REPO_NAME       = 'example-charts'
-        CHART_REPO_URL        = 'https://example.github.io/charts'
-        CHART_NAME            = 'example-kubernetes-integration'
+        // Helm chart repository and name (ArgoCD example)
+        // NOTE: Adapt these for any other Helm chart by changing CHART_REPO_* and CHART_NAME
+        CHART_REPO_NAME       = 'argo'
+        CHART_REPO_URL        = 'https://argoproj.github.io/argo-helm'
+        CHART_NAME            = 'argo-cd'
 
-        WORKSPACE_REPO_DIR    = 'work/your-tfmod-example-kubernetes-integration'
+        WORKSPACE_REPO_DIR    = 'work/your-tfmod-argocd'
     }
     stages {
         stage('Pipeline Configuration') {
@@ -85,9 +99,10 @@ pipeline {
             steps {
                 dir(env.WORKSPACE_REPO_DIR) {
                     script {
+                        // Query the current pinned version from the Terraform module
                         String currentVersion = sh(
                             returnStdout: true,
-                            script: "grep -A5 'variable \"example_chart_version\"' variables.tf | grep -m1 'default' | cut -d'\"' -f2"
+                            script: "grep -A5 'variable \"${env.TF_VAR_NAME}\"' variables.tf | grep -m1 'default' | cut -d'\"' -f2"
                         ).trim()
 
                         String latestVersion = sh(
@@ -96,9 +111,9 @@ pipeline {
                                 #!/usr/bin/env bash
                                 set -euo pipefail
 
-                                helm repo add example-charts https://example.github.io/charts >/dev/null 2>&1 || true
+                                helm repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
                                 helm repo update >/dev/null
-                                helm search repo example-charts/example-kubernetes-integration \
+                                helm search repo argo/argo-cd \
                                   --versions -o json | jq -r '.[0].version'
                             '''
                         ).trim()
@@ -171,7 +186,7 @@ pipeline {
             steps {
                 dir(env.WORKSPACE_REPO_DIR) {
                     script {
-                        env.SOURCE_BRANCH = "chore/automation/example-chart-${env.LATEST_CHART_VERSION}"
+                        env.SOURCE_BRANCH = "chore/automation/argocd-chart-${env.LATEST_CHART_VERSION}"
 
                         String variablesContent = readFile(env.TF_VAR_FILE)
                         String updatedVariablesContent = variablesContent.replaceFirst(
@@ -190,7 +205,7 @@ pipeline {
                         String changelogEntry = """## [${env.NEXT_MODULE_VERSION}] - ${entryDate} Automation
 
 ### Changed
-- Bump example-kubernetes-integration Helm chart default from ${env.CURRENT_CHART_VERSION} to ${env.LATEST_CHART_VERSION}.
+- Bump ArgoCD Helm chart default from ${env.CURRENT_CHART_VERSION} to ${env.LATEST_CHART_VERSION}.
 - Increment module version from ${env.CURRENT_MODULE_VERSION} to ${env.NEXT_MODULE_VERSION} due to Helm ${env.HELM_BUMP_OCTET} version change.
 
 """
@@ -218,7 +233,7 @@ pipeline {
                                 # Commit and push using HTTPS with token auth
                                 git config user.email "automation@example.com"
                                 git config user.name "Automation Bot"
-                                git commit -m "chore: bump example chart to $LATEST_CHART_VERSION and module to $NEXT_MODULE_VERSION"
+                                git commit -m "chore: bump ArgoCD chart to $LATEST_CHART_VERSION and module to $NEXT_MODULE_VERSION"
 
                                 git push \
                                   "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/${TARGET_ORG}/${TARGET_REPO}.git" \
@@ -236,7 +251,7 @@ pipeline {
             }
             steps {
                 script {
-                    String prTitle = "chore: bump example chart to ${env.LATEST_CHART_VERSION} (module ${env.NEXT_MODULE_VERSION})"
+                    String prTitle = "chore: bump ArgoCD chart to ${env.LATEST_CHART_VERSION} (module ${env.NEXT_MODULE_VERSION})"
 
                     String prId = GitHub.instance.openPullRequest(
                         this,
@@ -250,23 +265,27 @@ pipeline {
 
                     GitHub.instance.addPullRequestComment(
                         this,
-                        'Automated Chart Version Update',
+                        'ArgoCD Chart Version Update',
                         """Created by ${env.JOB_NAME} #${env.BUILD_NUMBER}.
 
+**What is this?**
+This is an example of the EKS Helm Lookup pipeline. It automates updating your Terraform module 
+when new ArgoCD Helm chart versions are released. Adapt this pattern for any other Helm chart.
+
 **Chart Version Update**
-Current Helm Chart default: ${env.CURRENT_CHART_VERSION}
-New Helm Chart default: ${env.LATEST_CHART_VERSION}
-Current EKS Module version: ${env.CURRENT_MODULE_VERSION}
-Next EKS Module version: ${env.NEXT_MODULE_VERSION}
+Current ArgoCD chart default: ${env.CURRENT_CHART_VERSION}
+New ArgoCD chart default: ${env.LATEST_CHART_VERSION}
+Current Terraform module version: ${env.CURRENT_MODULE_VERSION}
+Next Terraform module version: ${env.NEXT_MODULE_VERSION}
 Helm bump octet: ${env.HELM_BUMP_OCTET}
 
 **Testing Instructions**
 PLEASE TEST THIS CHANGE THOROUGHLY PRIOR TO MERGING. To test this change:
 
-1. Clone your Kubernetes examples repository
+1. Clone your infrastructure repository
 2. Update the module source to point to this branch: \`source = "git::https://github.com/${env.TARGET_ORG}/${env.TARGET_REPO}?ref=${env.SOURCE_BRANCH}"\`
-3. Apply Terraform to deploy an EKS cluster with the new example chart version
-4. Verify the example Helm chart is deployed and functioning correctly
+3. Apply Terraform to deploy ArgoCD with the new chart version
+4. Verify ArgoCD is deployed and functioning correctly
 
 Build URL: ${env.BUILD_URL}""",
                         false
@@ -284,11 +303,12 @@ Build URL: ${env.BUILD_URL}""",
                     slackSend(
                         channel: params.SLACK_CHANNEL,
                         color: 'good',
-                        message: """*Example Helm Update* — draft PR opened for `${env.TARGET_REPO}`.
-*Current Helm Chart version:* `${env.CURRENT_CHART_VERSION}`
-*Latest Helm Chart version:* `${env.LATEST_CHART_VERSION}`
-*EKS Module version:* `${env.CURRENT_MODULE_VERSION}` → `${env.NEXT_MODULE_VERSION}`
+                        message: """*ArgoCD Chart Version Update* — draft PR opened for `${env.TARGET_REPO}`.
+*Current ArgoCD chart version:* `${env.CURRENT_CHART_VERSION}`
+*Latest ArgoCD chart version:* `${env.LATEST_CHART_VERSION}`
+*Terraform module version:* `${env.CURRENT_MODULE_VERSION}` → `${env.NEXT_MODULE_VERSION}`
 *Bump octet:* `${env.HELM_BUMP_OCTET}`
+*Example:* This pipeline demonstrates automating Helm chart version updates. Adapt it for any chart.
 *PR:* https://github.com/${env.TARGET_ORG}/${env.TARGET_REPO}/pull/${env.PULL_REQUEST_ID}
 *Build:* ${env.BUILD_URL}"""
                     )
@@ -302,7 +322,7 @@ Build URL: ${env.BUILD_URL}""",
             slackSend(
                 channel: params.SLACK_CHANNEL,
                 color: 'danger',
-                message: """*Example Helm Update* — job failed.
+                message: """*ArgoCD Chart Version Update* — job failed.
 *Repository:* `${env.TARGET_REPO}`
 *Build:* ${env.BUILD_URL}"""
             )
