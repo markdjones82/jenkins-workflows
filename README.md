@@ -10,4 +10,4 @@ Example Jenkins Workflows for all kinds of scenarios.
 
 ### Pipelines
 
-- **[EKS Helm Lookup](eks-helm-lookup/README.md)** — Automated pipeline for detecting new Helm chart releases and updating Terraform modules with semantic versioning. Includes a production-ready ArgoCD example module with HA, Ingress, TLS, and notification support.
+- **[EKS Helm Lookup](eks-helm-lookup/README.md)** — Automated pipeline for detecting new Helm chart releases and updating Terraform modules with semantic versioning that follows the dependant Helm versioning. Includes a production-ready ArgoCD example module with HA, Ingress, TLS, and notification support.
