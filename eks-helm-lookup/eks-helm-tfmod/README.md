@@ -49,6 +49,71 @@ module "argocd" {
 }
 ```
 
+## Provider Configuration
+
+This module requires the Kubernetes and Helm providers to be configured to target your existing EKS cluster. Add the following to your Terraform configuration:
+
+**For an existing EKS cluster (referenced via data source):**
+
+```hcl
+data "aws_eks_cluster" "main" {
+  name = "my-existing-cluster"
+}
+
+data "aws_eks_auth" "main" {
+  name = data.aws_eks_cluster.main.name
+}
+
+provider "kubernetes" {
+  host                   = data.aws_eks_cluster.main.endpoint
+  cluster_ca_certificate = base64decode(data.aws_eks_cluster.main.certificate_authority[0].data)
+  token                  = data.aws_eks_auth.main.token
+
+  experiments {
+    manifest_resource = true
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = data.aws_eks_cluster.main.endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.main.certificate_authority[0].data)
+    token                  = data.aws_eks_auth.main.token
+  }
+}
+```
+
+**For an EKS cluster created in the same Terraform configuration:**
+
+```hcl
+data "aws_eks_auth" "main" {
+  name = aws_eks_cluster.main.name
+}
+
+provider "kubernetes" {
+  host                   = aws_eks_cluster.main.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.main.certificate_authority[0].data)
+  token                  = data.aws_eks_auth.main.token
+
+  experiments {
+    manifest_resource = true
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.main.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.main.certificate_authority[0].data)
+    token                  = data.aws_eks_auth.main.token
+  }
+}
+```
+
+**Requirements for provider configuration:**
+- `aws_eks_auth` data source (from AWS provider)
+- Valid AWS credentials configured locally or via IAM role
+- Sufficient permissions to access the EKS cluster API
+
 ## Inputs
 
 | Variable | Type | Default | Description |
